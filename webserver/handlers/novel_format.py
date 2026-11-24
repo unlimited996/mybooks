@@ -345,7 +345,9 @@ class NovelFormatSave(BaseHandler):
         tagged = False
         try:
             tags = list(self.calibre_db_cache.field_for("tags", book_id, default_value=()) or ())
-            if REVISED_TAG not in tags:
+            # 已经有标签也算「tagged」，否则前端会把「本来就有」误报成「写入失败」
+            tagged = REVISED_TAG in tags
+            if not tagged:
                 await self.run_calibre_async(
                     self.calibre_db.bulk_modify_tags,
                     [book_id],
