@@ -468,18 +468,22 @@ export default {
             this.sourceText = '';
             this.result = '';
             try {
-                const rsp = await this.$backend(`/novel_format/${book.id}/text`);
-                if (rsp.err !== 'ok') {
-                    this.loadFailed = rsp.msg || this.$t('novelFormat.loadFailed');
-                    this.recordSkip(book, this.loadFailed);
-                    if (this.autoRunning) {
-                        await this.advance();
+                // 走 text/plain 接口：几十万字的长篇用 JSON 会多出「转义 + 解析」两份副本，
+                // 连续处理几十本时很容易把标签页顶到 Out of Memory。
+                const resp = await fetch(`/api/novel_format/${book.id}/raw`, { credentials: 'include' });
+                if (!resp.ok) {
+                    let msg = this.$t('novelFormat.loadFailed');
+                    try {
+                        const body = await resp.json();
+                        msg = body.msg || msg;
+                    } catch (e) {
+                        // 非 JSON 错误体就沿用通用文案
                     }
-                    return;
+                    throw new Error(msg);
                 }
-                this.sourceText = rsp.data.content || '';
-                this.encoding = rsp.data.encoding || 'utf-8';
-                this.bookSize = rsp.data.size || 0;
+                this.sourceText = await resp.text();
+                this.encoding = decodeURIComponent(resp.headers.get('X-Novel-Encoding') || 'utf-8');
+                this.bookSize = Number(resp.headers.get('X-Novel-Size')) || 0;
                 this.authorGuess = detectAuthor(this.sourceText, book.title);
                 if (!this.sourceText) {
                     this.loadFailed = this.$t('novelFormat.noContent');
@@ -551,15 +555,28 @@ export default {
         async saveToBook() {
             const book = this.currentBook;
             if (!book) return;
-            const rsp = await this.$backend(`/novel_format/${book.id}/save`, {
+            // 正文以原始 UTF-8 提交，避免 JSON.stringify 生成一份等大的转义副本
+            const resp = await fetch(`/api/novel_format/${book.id}/save`, {
                 method: 'POST',
-                body: JSON.stringify({
-                    content: this.result,
-                    encoding: this.encoding,
-                    author: this.prefs.autoAuthor && this.authorGuess ? this.authorGuess : '',
-                }),
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'text/plain; charset=utf-8',
+                    'X-Novel-Encoding': encodeURIComponent(this.encoding || 'utf-8'),
+                    'X-Novel-Author': encodeURIComponent(
+                        this.prefs.autoAuthor && this.authorGuess ? this.authorGuess : ''
+                    ),
+                },
+                body: this.result,
             });
-            if (rsp.err !== 'ok') throw new Error(rsp.msg || this.$t('novelFormat.coverFailed'));
+            let rsp = null;
+            try {
+                rsp = await resp.json();
+            } catch (e) {
+                rsp = null;
+            }
+            if (!rsp || rsp.err !== 'ok') {
+                throw new Error((rsp && rsp.msg) || this.$t('novelFormat.coverFailed'));
+            }
             // 按书籍去重：同一本反复点「覆盖」只算一本，计数口径是「覆盖过的书」而非点击次数
             if (!this.coveredIds.includes(book.id)) {
                 this.coveredIds.push(book.id);
@@ -621,6 +638,10 @@ export default {
             if (this.index >= this.total) {
                 this.finishBatch();
                 return;
+            }
+            if (this.autoRunning) {
+                // 给渲染进程一个喘息窗口：连续上百本时旧的大字符串才有机会被 GC 回收
+                await new Promise((resolve) => setTimeout(resolve, 200));
             }
             await this.loadCurrent();
         },

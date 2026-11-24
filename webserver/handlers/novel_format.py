@@ -11,9 +11,11 @@
 
 只处理 TXT：小说排版算法基于纯文本，EPUB 等格式不在本功能范围内。
 """
+import codecs
 import logging
 import os
 import tempfile
+from urllib.parse import quote, unquote
 
 import tornado.escape
 
@@ -25,8 +27,9 @@ from webserver.services.extract import ExtractService
 
 CONF = get_settings()
 
-# 单本上限：排版算法与前端 textarea 都在内存里跑，40MB 纯文本已远超正常网文体量
-MAX_TEXT_BYTES = 40 * 1024 * 1024
+# 单本上限：100MB 纯文本（约 5000 万字）。前端只渲染 5 万字预览，但排版本身要把
+# 整本读进内存，超大文件仍会明显吃内存/耗时，所以保留这道硬上限防止误操作。
+MAX_TEXT_BYTES = 100 * 1024 * 1024
 # 编码检测只需要样本，整本读进来再交给 chardet 会白白多占一份内存
 ENCODING_SAMPLE_BYTES = 64 * 1024
 # 繁简转换单次上限：纯 Python OpenCC 是逐词匹配，超大文本会长时间占住请求线程
@@ -55,6 +58,66 @@ def _clean_author(value):
         return ""
     return author
 
+
+
+def _normalize_encoding(name):
+    """把 chardet 的各种写法收敛到 Python 能稳定解码的几种。"""
+    n = (name or "").strip().lower().replace("_", "-")
+    if not n:
+        return ""
+    if "gb" in n or n in ("hz-gb-2312", "euc-cn", "cp936"):
+        return "gb18030"
+    if "big5" in n or "cp950" in n:
+        return "big5"
+    if "utf-16" in n or "utf16" in n:
+        return "utf-16"
+    if "utf-8" in n or "utf8" in n:
+        return "utf-8"
+    return name
+
+
+# BOM 判断顺序要从长到短：UTF-32 LE 的前两字节和 UTF-16 LE 相同
+_TEXT_BOMS = (
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def _decode_novel_text(raw):
+    """把 TXT 字节解码成 Unicode，返回 (text, encoding)。
+
+    背景：以前只信 chardet 的第一个猜测，猜错（或旧版本直接按 UTF-8 解）时
+    GBK 小说会整本变成替换字符，而且写回时还会按错误编码覆盖原文件。
+    这里按「BOM → 严格 UTF-8 → chardet → 常见中文编码」逐个试，只接受能整本
+    严格解码的候选；全部失败时才按替换字符最少的方案容错。
+    """
+    for bom, enc in _TEXT_BOMS:
+        if raw.startswith(bom):
+            text = raw.decode(enc, errors="replace").lstrip("\ufeff")
+            return text, enc
+
+    sample = raw[:ENCODING_SAMPLE_BYTES]
+    candidates = []
+    for enc in (_normalize_encoding(get_content_encoding(sample)), "utf-8", "gb18030", "big5"):
+        if enc and enc not in candidates:
+            candidates.append(enc)
+
+    for enc in candidates:
+        try:
+            return raw.decode(enc), enc
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    best = None
+    for enc in candidates:
+        text = raw.decode(enc, errors="replace")
+        bad = text.count("\ufffd")
+        if best is None or bad < best[0]:
+            best = (bad, text, enc)
+    return best[1], best[2]
 
 
 def _get_txt_path(handler, book_id):
@@ -89,13 +152,8 @@ class NovelFormatText(BaseHandler):
         with open(fpath, "rb") as f:
             raw = f.read()
 
-        encoding = get_content_encoding(raw[:ENCODING_SAMPLE_BYTES]) or "utf-8"
-        try:
-            text = raw.decode(encoding, errors="strict")
-        except (LookupError, UnicodeDecodeError):
-            # chardet 给的是猜测值，个别文件会在中途出现非法字节：退回 UTF-8 容错解码
-            encoding = "utf-8"
-            text = raw.decode("utf-8", errors="replace")
+        text, encoding = _decode_novel_text(raw)
+        logging.debug("[novel_format] book %s decoded as %s", book_id, encoding)
 
         # 编辑场景不需要 BOM，去掉后前端拿到的就是纯正文；保存时按原编码写回（UTF-8-SIG 会补回 BOM）
         if text.startswith("\ufeff"):
@@ -114,6 +172,51 @@ class NovelFormatText(BaseHandler):
         }
 
 
+class NovelFormatTextRaw(BaseHandler):
+    """读取 TXT 全文，直接以 text/plain 返回。
+
+    走 JSON 时同一份正文会经历「JSON 转义 → 传输 → 解析」多份副本，几百万字的书
+    单次响应可达 28MB，几十本连续处理很容易把浏览器渲染进程顶到 OOM。这里省掉
+    JSON 包装，响应体积接近正文本身，前端也少一次 JSON.parse 的峰值。
+    """
+
+    def get(self, bid):
+        if not self.current_user:
+            self.set_status(401)
+            return self.write({"err": "user.need_login", "msg": _("请先登录")})
+        if not self.admin_user:
+            self.set_status(403)
+            return self.write({"err": "permission.not_admin", "msg": _("当前用户非管理员, 无权限操作")})
+
+        book_id = int(bid)
+        fpath, err = _get_txt_path(self, book_id)
+        if err:
+            self.set_status(400 if err.get("err") == "format.not_supported" else 404)
+            return self.write(err)
+
+        size = os.path.getsize(fpath)
+        if size > MAX_TEXT_BYTES:
+            self.set_status(413)
+            return self.write({
+                "err": "text.too_large",
+                "msg": _("文件超过 %(size)s MB，暂不支持排版整理") % {"size": MAX_TEXT_BYTES // (1024 * 1024)},
+            })
+
+        with open(fpath, "rb") as f:
+            raw = f.read()
+
+        text, encoding = _decode_novel_text(raw)
+        logging.debug("[novel_format] book %s decoded as %s", book_id, encoding)
+        if text.startswith("\ufeff"):
+            text = text.lstrip("\ufeff")
+
+        self.set_header("Cache-Control", "no-store")
+        self.set_header("Content-Type", "text/plain; charset=utf-8")
+        self.set_header("X-Novel-Encoding", quote(encoding, safe=""))
+        self.set_header("X-Novel-Size", str(size))
+        self.write(text)
+
+
 class NovelFormatSave(BaseHandler):
     """用排版结果覆盖书籍的 TXT 原文件。"""
 
@@ -121,10 +224,23 @@ class NovelFormatSave(BaseHandler):
     @is_admin
     async def post(self, bid):
         book_id = int(bid)
-        try:
-            data = tornado.escape.json_decode(self.request.body)
-        except Exception:
-            return {"err": "params.invalid", "msg": _("请求内容不是合法 JSON")}
+        ctype = (self.request.headers.get("Content-Type") or "").lower()
+        if ctype.startswith("text/plain"):
+            # 正文以原始 UTF-8 传上来：省掉 JSON.stringify 的转义副本，降低浏览器峰值内存
+            try:
+                content = self.request.body.decode("utf-8")
+            except UnicodeDecodeError:
+                return {"err": "params.invalid", "msg": _("正文不是合法的 UTF-8 文本")}
+            data = {
+                "content": content,
+                "encoding": unquote(self.request.headers.get("X-Novel-Encoding", "")) or "utf-8",
+                "author": unquote(self.request.headers.get("X-Novel-Author", "")),
+            }
+        else:
+            try:
+                data = tornado.escape.json_decode(self.request.body)
+            except Exception:
+                return {"err": "params.invalid", "msg": _("请求内容不是合法 JSON")}
 
         content = data.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -267,6 +383,7 @@ class NovelFormatConvert(BaseHandler):
 def routes():
     return [
         (r"/api/novel_format/convert", NovelFormatConvert),
+        (r"/api/novel_format/([0-9]+)/raw", NovelFormatTextRaw),
         (r"/api/novel_format/([0-9]+)/text", NovelFormatText),
         (r"/api/novel_format/([0-9]+)/save", NovelFormatSave),
     ]
