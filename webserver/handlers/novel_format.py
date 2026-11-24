@@ -14,7 +14,9 @@
 import codecs
 import logging
 import os
+import shutil
 import tempfile
+import time
 from urllib.parse import quote, unquote
 
 import tornado.escape
@@ -267,6 +269,24 @@ class NovelFormatSave(BaseHandler):
         if payload is None:
             used_encoding = "utf-8"
             payload = content.encode("utf-8", errors="replace")
+
+        # 覆盖前留一份原文件：编码判断失误时还能人工还原（每本保留最近 5 份）
+        try:
+            library_root = os.path.dirname(os.path.dirname(fpath))
+            backup_dir = os.path.join(library_root, ".novel_format_backup")
+            os.makedirs(backup_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            shutil.copy2(fpath, os.path.join(backup_dir, "%s_%s.txt" % (book_id, stamp)))
+            olds = sorted(
+                f for f in os.listdir(backup_dir) if f.startswith("%s_" % book_id)
+            )
+            for name in olds[:-5]:
+                try:
+                    os.unlink(os.path.join(backup_dir, name))
+                except OSError:
+                    pass
+        except Exception as err:
+            logging.warning("[novel_format] backup before overwrite failed: %s", err)
 
         fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="novel_format_")
         try:
