@@ -460,7 +460,9 @@
       "confirm_new_password": "确认新密码",
       "change_password_save": "确认修改",
       "change_password_ok": "密码修改成功",
-      "password_mismatch": "两次输入的密码不一致"
+      "password_mismatch": "两次输入的密码不一致",
+      "upload_count": "上传数量",
+      "downloadHistoryHint": "含历史记录（最多 60 条）"
     }
   },
   "imports": {

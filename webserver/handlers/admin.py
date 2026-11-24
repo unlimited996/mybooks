@@ -95,12 +95,21 @@ class AdminUsers(feature_modules.ModuleGateMixin, BaseHandler):
                 .subquery()
             )
 
-        f = {
+        # 可排序字段：覆盖用户表里页面上能看到的全部字段
+        sort_fields = {
             "id": Reader.id,
             "access_time": Reader.access_time,
             "create_time": Reader.create_time,
             "update_time": Reader.update_time,
-            "username": Reader.username,
+            "username": func.lower(Reader.username),
+            "name": func.lower(func.coalesce(Reader.name, "")),
+            "email": func.lower(func.coalesce(Reader.email, "")),
+            "active": Reader.active,
+            "admin": Reader.admin,
+            "permission": Reader.permission,
+            "read_limit": Reader.read_limit,
+            "vipquota": Reader.vipquota,
+            "vipexpire": Reader.vipexpire,
             "total_reading_seconds": Reader.total_reading_seconds,
             "download_count": Reader.download_count,
             "push_count": (
@@ -108,7 +117,29 @@ class AdminUsers(feature_modules.ModuleGateMixin, BaseHandler):
                 if push_count_subq is not None
                 else None
             ),
-        }.get(sort, Reader.id)
+        }
+        if sort == "upload_count":
+            # 上传数 = 该用户作为上传者（items.collector_id）的书籍数
+            upload_subq = (
+                self.sqlite_session.query(func.count(Item.book_id))
+                .filter(Item.collector_id == Reader.id)
+                .correlate(Reader)
+                .scalar_subquery()
+            )
+            f = func.coalesce(upload_subq, 0)
+        elif sort == "read_count":
+            read_subq = (
+                self.sqlite_session.query(func.count(Reading.id))
+                .filter(
+                    Reading.reader_id == Reader.id,
+                    Reading.action == Reading.ACTION_READ,
+                )
+                .correlate(Reader)
+                .scalar_subquery()
+            )
+            f = func.coalesce(read_subq, 0)
+        else:
+            f = sort_fields.get(sort, Reader.id)
         if desc == "false":
             f = f.asc()
         else:
@@ -209,11 +240,14 @@ class AdminUsers(feature_modules.ModuleGateMixin, BaseHandler):
                 need_update = True
                 USER_UPDATE_TS_MAP[user.id] = datetime.datetime.now()
             if need_update or "upload_history_count" not in user.extra:
-                d["extra"]["upload_history_count"] = self.get_user_upload_cnt(user.id)
+                upload_cnt = self.get_user_upload_cnt(user.id)
             else:
-                d["extra"]["upload_history_count"] = user.extra.get(
-                    "upload_history_count", 0
-                )
+                upload_cnt = user.extra.get("upload_history_count", 0)
+            d["extra"]["upload_history_count"] = upload_cnt
+            # 单独给一列，前端可以直接排序/展示，不用展开「详情」才看得到
+            d["upload_count"] = int(upload_cnt or 0)
+            # 历史下载记录（旧版本的下载数就存在这里，上限 60 条）
+            d["download_history_count"] = len(user.extra.get("download_history") or [])
             items.append(d)
         return {
             "err": "ok",
@@ -891,7 +925,35 @@ class AdminSSL(BaseHandler):
 class AdminBookList(BaseHandler):
     def _search_book_ids(self, search, sort, ascending):
         self.calibre_db.sort(field=sort, ascending=ascending)
-        return list(self.calibre_db_cache.search(search))
+        # 空搜索直接取全部 id：既省掉一次查询语法解析，也避免空串进解析器的边界行为
+        if not search:
+            return list(self.calibre_db_cache.all_book_ids())
+        try:
+            # search() 在「无匹配」时可能返回 None，list(None) 会变成 500
+            return list(self.calibre_db_cache.search(search) or ())
+        except Exception as exc:
+            logging.warning("calibre search query %r failed: %s", search, exc)
+
+        # calibre 的搜索是「查询语法」（field:value、AND/OR/NOT、括号分组），
+        # 用户随手敲一个没闭合的括号就会解析失败。这里做两级降级，尽量按普通
+        # 关键字搜出结果，而不是直接报错：
+        #   1) 去掉尾部多余的括号 / 引号（tags:网络小说( → tags:网络小说）
+        #   2) 整体当成一个带引号的字面短语再试一次
+        candidate = (search or "").rstrip()
+        while candidate and candidate[-1] in "()（）\"'":
+            candidate = candidate[:-1].rstrip()
+        if candidate and candidate != search:
+            try:
+                return list(self.calibre_db_cache.search(candidate) or ())
+            except Exception:
+                pass
+
+        literal = '"' + search.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        try:
+            return list(self.calibre_db_cache.search(literal) or ())
+        except Exception as exc:
+            logging.warning("literal search fallback failed for %r: %s", search, exc)
+            raise ValueError(str(exc))
 
     @js
     @is_admin
@@ -919,9 +981,15 @@ class AdminBookList(BaseHandler):
             logging.debug("Adjusted search query: %s" % search)
         start = page * num
         end = start + num
-        all_ids = await self.run_calibre_async(
-            self._search_book_ids, search, sort, not desc
-        )
+        try:
+            all_ids = await self.run_calibre_async(
+                self._search_book_ids, search, sort, not desc
+            )
+        except ValueError as exc:
+            return {
+                "err": "params.search.invalid",
+                "msg": _("搜索语法有误（检查括号/引号是否闭合）：%s") % exc,
+            }
         total = len(all_ids)
 
         # sort by id

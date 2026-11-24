@@ -22,6 +22,12 @@
             <template v-slot:item.total_reading_seconds="{ item }">
                 {{ (item.total_reading_seconds / 3600).toFixed(1) }}
             </template>
+            <template v-slot:item.upload_count="{ item }">
+                {{ item.upload_count || 0 }}
+            </template>
+            <template v-slot:item.download_count="{ item }">
+                <span :title="$t('admin.users.downloadHistoryHint')">{{ item.download_display }}</span>
+            </template>
             <template v-slot:item.download_quota="{ item }">
                 {{ item.download_quota_used || 0 }}/{{ item.download_quota_limit ? item.download_quota_limit : '∞' }}
             </template>
@@ -363,9 +369,11 @@ export default {
         this.baseHeaders = [
             { text: this.$t('admin.users.id'), sortable: true, value: "id", width: 80 },
             { text: this.$t('admin.users.username'), sortable: true, value: "username" },
-            { text: this.$t('admin.users.nickname'), sortable: false, value: "name" },
+            { text: this.$t('admin.users.nickname'), sortable: true, value: "name" },
             { text: this.$t('admin.users.email'), sortable: true, value: "email" },
+            { text: this.$t('admin.users.access_time'), sortable: true, value: "access_time", width: 150 },
             { text: this.$t('admin.users.total_reading_hours'), sortable: true, value: "total_reading_seconds" },
+            { text: this.$t('admin.users.upload_count'), sortable: true, value: "upload_count" },
             { text: this.$t('admin.users.download_count'), sortable: true, value: "download_count" },
             { text: this.$t('admin.users.download_quota'), sortable: false, value: "download_quota" },
             { text: this.$t('admin.users.push_count'), sortable: true, value: "push_count" },
@@ -601,6 +609,10 @@ export default {
                     }
                     this.items = (rsp.users.items || []).map((u) => ({
                         ...u,
+                        // 旧库的下载记录在 extra.download_history（上限 60 条），
+                        // v4.7 新增的 download_count 列迁移后从 0 开始，
+                        // 两者取大，避免历史下载数看起来"消失"了
+                        download_display: Math.max(Number(u.download_count) || 0, Number(u.download_history_count) || 0),
                         _quotaMenuOpen: false,
                         _quotaEditValue: u.download_daily_quota ?? -1,
                     }));

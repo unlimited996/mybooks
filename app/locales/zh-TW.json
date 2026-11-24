@@ -459,7 +459,9 @@
       "confirm_new_password": "確認新密碼",
       "change_password_save": "確認修改",
       "change_password_ok": "密碼修改成功",
-      "password_mismatch": "兩次輸入的密碼不一致"
+      "password_mismatch": "兩次輸入的密碼不一致",
+      "upload_count": "上傳數量",
+      "downloadHistoryHint": "含歷史記錄（最多 60 條）"
     }
   },
   "imports": {

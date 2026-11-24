@@ -462,7 +462,9 @@
       "confirm_new_password": "Confirmation",
       "change_password_save": "Confirm",
       "change_password_ok": "Password changed successfully",
-      "password_mismatch": "Mismatched password and confirm password"
+      "password_mismatch": "Mismatched password and confirm password",
+      "upload_count": "Uploads",
+      "downloadHistoryHint": "Includes historical records (max 60)"
     }
   },
   "imports": {
