@@ -63,18 +63,42 @@ class AIFillInfoService(AsyncService):
     def _apply_ai_info(self, book_id: int, mi, info: AIBookInfo) -> bool:
         allow_category = CONF.get("AI_ALLOW_SET_CATEGORY", True)
         try:
+            # 标签是「追加」而不是替换：保留书库原有标签（如「精校」「网络小说」），
+            # 只把 AI 新给出的标签补进去，避免一次 AI 更新把人工整理过的标签冲掉。
             if info.tags:
-                mi.tags = info.tags
+                merged = list(mi.tags or [])
+                lowered = {str(t).strip().lower() for t in merged}
+                for tag in info.tags:
+                    value = str(tag).strip()
+                    if value and value.lower() not in lowered:
+                        merged.append(value)
+                        lowered.add(value.lower())
+                mi.tags = merged
             if info.comments:
                 mi.comments = info.comments
             if info.category and allow_category:
                 mi.set(CALIBRE_COLUMN_CATEGORY, info.category)
             if info.authors:
-                mi.authors = mi.authors = [utils.super_strip(a) for a in info.authors]
+                mi.authors = [utils.super_strip(a) for a in info.authors]
             if info.pubdate:
                 mi.pubdate = str2date(info.pubdate)
+            # 与互联网同步对齐：出版社 / ISBN / 丛书有值才写，空值不覆盖原数据
+            if info.publisher:
+                mi.publisher = utils.super_strip(info.publisher)
+            if info.isbn and BookAIClient._is_valid_isbn(info.isbn):
+                mi.isbn = utils.super_strip(info.isbn)
+            if info.series:
+                mi.series = utils.super_strip(info.series)
+                if not mi.series_index:
+                    mi.series_index = 1.0
 
             self.db.set_metadata(book_id, mi, ignore_errors=True, force_changes=True)
+            # 封面不在 set_metadata 里：单独写，失败不影响文字元数据
+            if info.cover_data and info.cover_data[1]:
+                try:
+                    self.db.set_cover(book_id, info.cover_data[1])
+                except Exception as cover_err:
+                    logging.warning("[AIFill] Failed to set cover for id=%d: %s", book_id, cover_err)
             if info.category and allow_category:
                 try:
                     self.db.new_api.set_field(CALIBRE_COLUMN_CATEGORY, {book_id: info.category})

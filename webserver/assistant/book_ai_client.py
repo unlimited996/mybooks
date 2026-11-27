@@ -20,6 +20,11 @@ class AIBookInfo:
     pubdate: str = ""
     summary: str = ""
     author_intro: str = ""
+    publisher: str = ""
+    isbn: str = ""
+    series: str = ""
+    # 封面来自参考信息源的 cover_url（AI 本身不产图），(格式, 字节) 与 calibre cover_data 一致
+    cover_data: Optional[tuple] = None
 
     @property
     def comments(self) -> str:
@@ -48,6 +53,9 @@ class BookAIClient:
         '  "category": "书籍分类（单个，如：小说、历史、科技、文学、传记、哲学、艺术、经济等）",'
         '  "tags": ["标签1", "标签2"],'
         '  "authors": ["作者1", "作者2"],'
+        '  "publisher": "出版社，没有则留空字符串",'
+        '  "isbn": "ISBN，没有则留空字符串",'
+        '  "series": "所属丛书/系列，没有则留空字符串",'
         '  "pubdate": "出版年月（如：2026-05或2026）",'
         '  "summary": "书籍主要内容总结（800字以内）",'
         '  "author_intro": "作者介绍（200字以内，无充分信息时留空字符串）"'
@@ -88,6 +96,49 @@ class BookAIClient:
         text = str(value or "").lower()
         text = re.sub(r"[\s\[\](){}<>《》【】（）:：,，.。!！?？'\"“”‘’_\-—/\\|]+", "", text)
         return text
+
+    @staticmethod
+    def _guess_image_format(data: bytes) -> str:
+        if data[:3] == b"\xff\xd8\xff":
+            return "jpeg"
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return "png"
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            return "gif"
+        return "jpeg"
+
+    @classmethod
+    def _download_cover(cls, books):
+        """从参考结果里取封面：优先已有 cover_data，其次按 provider_key 下载 cover_url。"""
+        def normalize(value):
+            if isinstance(value, (tuple, list)) and len(value) == 2 and value[1]:
+                fmt = str(value[0] or "jpeg").lower()
+                if fmt in ("jpg", "jpeg"):
+                    fmt = "jpeg"
+                return (fmt, bytes(value[1]))
+            return None
+
+        for book in books:
+            data = normalize(getattr(book, "cover_data", None))
+            if data:
+                return data
+        for book in books:
+            url = getattr(book, "cover_url", "") or ""
+            key = getattr(book, "provider_key", "") or ""
+            if not url or not key:
+                continue
+            try:
+                raw = BookSearch.get_cover(key, url)
+                if not raw:
+                    continue
+                data = normalize(raw)
+                if data:
+                    return data
+                if isinstance(raw, (bytes, bytearray)):
+                    return (cls._guess_image_format(raw), bytes(raw))
+            except Exception as err:
+                logging.warning("[BookAI] Download cover failed for %s: %s", url, err)
+        return None
 
     @classmethod
     def _pick_references(cls, books, title, limit=5):
@@ -209,6 +260,7 @@ class BookAIClient:
             search_results = BookSearch.search_books(title=title, isbn=search_isbn)
             if search_results:
                 picked = self._pick_references(search_results, title)
+                info_cover = self._download_cover(picked)
                 ref_text = self._format_search_results(picked)
                 logging.info(
                     "[BookAI] Use %d/%d reference(s) for '%s': %s",
@@ -222,6 +274,8 @@ class BookAIClient:
             logging.warning("[BookAI] BookSearch failed for '%s': %s", title, e)
 
         user_prompt = "\n".join(lines)
+        info_cover = None
+        picked = []
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -241,19 +295,43 @@ class BookAIClient:
 
             data = self._parse_json_content(content)
             info = AIBookInfo(
+                cover_data=info_cover,
                 category=str(data.get("category", "")).strip(),
                 tags=[str(t).strip() for t in data.get("tags", []) if str(t).strip()],
                 authors=[str(a).strip() for a in data.get("authors", []) if str(a).strip()],
                 summary=str(data.get("summary", "")).strip(),
                 author_intro=str(data.get("author_intro", "")).strip(),
                 pubdate=str(data.get("pubdate", "")).strip(),
+                publisher=str(data.get("publisher", "")).strip(),
+                isbn=str(data.get("isbn", "")).strip(),
+                series=str(data.get("series", "")).strip(),
             )
+            # AI 没给出的字段，用最相关的那条参考元数据补齐（出版社/ISBN/丛书/出版时间）
+            ref = picked[0] if picked else None
+            if ref is not None:
+                if not info.publisher and getattr(ref, "publisher", ""):
+                    info.publisher = str(ref.publisher).strip()
+                if not info.isbn and getattr(ref, "isbn", ""):
+                    info.isbn = str(ref.isbn).strip()
+                if not info.series and getattr(ref, "series", ""):
+                    info.series = str(ref.series).strip()
+                if not info.pubdate and getattr(ref, "pubdate", None):
+                    try:
+                        info.pubdate = ref.pubdate.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                if not info.authors and getattr(ref, "authors", None):
+                    info.authors = [str(a).strip() for a in ref.authors if str(a).strip()]
+
             logging.info(
-                "[BookAI] Got info for '%s': category=%s, tags=%s, authors=%s",
+                "[BookAI] Got info for '%s': category=%s, tags=%s, authors=%s, publisher=%s, series=%s, cover=%s",
                 title,
                 info.category,
                 info.tags,
-                info.authors
+                info.authors,
+                info.publisher,
+                info.series,
+                bool(info.cover_data),
             )
             return info
 
