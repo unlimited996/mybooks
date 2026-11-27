@@ -34,7 +34,6 @@ class BaiduBaikeApi:
 
     def _metadata(self, baike):
         from calibre.ebooks.metadata.book.base import Metadata
-        from calibre.utils.date import utcnow
 
         info = baike.get_info()
         logging.debug("\n" + "\n".join("%s:\t%s" % v for v in info.items()))
@@ -52,11 +51,25 @@ class BaiduBaikeApi:
         mi.author_sort = mi.authors[0]
         mi.isbn = info.get("ISBN", DEFAULT_ISBN)
         mi.tags = []
-        pd = str2date(info.get(u"出版时间"))
-        if pd is None:
-            pd = utcnow()
-        mi.pubdate = pd
-        mi.timestamp = mi.pubdate
+        # 百科词条字段不统一：正式出版物多用「出版时间」，网络小说常用
+        # 「连载时间 / 创作时间 / 首发时间」。以前只认「出版时间」，
+        # 取不到就用 utcnow() 填充，导致同步结果里出现「今天」这种假日期。
+        pubdate = None
+        for key in (
+            "出版时间", "出版日期", "出版年", "出版年份", "首版时间",
+            "发行时间", "连载时间", "创作时间", "创作年代", "撰写时间",
+            "写作时间", "成书时间", "首发时间",
+        ):
+            raw = info.get(key)
+            if not raw:
+                continue
+            parsed = str2date(raw)
+            if parsed is not None:
+                pubdate = parsed
+                break
+        # 识别不出来就留空，让元数据合并时保留书库原值，而不是写成当前时间
+        mi.pubdate = pubdate
+        mi.timestamp = pubdate
         normal_cover, mi.cover_url = baike.get_image()
         mi.comments = baike.get_summary()
         mi.website = baike.http.url
