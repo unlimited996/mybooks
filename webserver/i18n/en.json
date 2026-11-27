@@ -615,5 +615,7 @@
   "Book Folder": "Book Folder",
   "Translator": "Translator",
   "Location": "Location",
-  "访客今日下载次数已达上限(%d/%d)，请明天再试": "Guest download limit reached for today (%d/%d). Please try again tomorrow."
+  "访客今日下载次数已达上限(%d/%d)，请明天再试": "Guest download limit reached for today (%d/%d). Please try again tomorrow.",
+  "AI call failed (API error or unparsable response); check logs": "AI call failed (API error or unparsable response); check logs",
+  "AI found insufficient information; no category/tags generated": "AI found insufficient information; no category/tags generated"
 }

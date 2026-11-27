@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -83,6 +84,52 @@ class BookAIClient:
         return False
 
     @staticmethod
+    def _norm_title(value) -> str:
+        text = str(value or "").lower()
+        text = re.sub(r"[\s\[\](){}<>《》【】（）:：,，.。!！?？'\"“”‘’_\-—/\\|]+", "", text)
+        return text
+
+    @classmethod
+    def _pick_references(cls, books, title, limit=5):
+        """从多源搜索结果里挑和书名最相关的几条。
+
+        搜索源按注册顺序返回，冷门书名（如《来临》）前面往往是一堆
+        「假如明天来临」「狐狸在夜晚来临」这类同词书；百度百科的正确条目
+        可能排在第 6 位。只取前 3 条会让模型看到一堆不相关的书，从而判定
+        「信息不足」全部留空。
+        """
+        target = cls._norm_title(title)
+
+        def score(book):
+            value = 0
+            book_title = cls._norm_title(getattr(book, "title", ""))
+            if book_title and target:
+                if book_title == target:
+                    value += 100
+                elif target in book_title or book_title in target:
+                    value += 60
+            if "百科" in str(getattr(book, "source", "")):
+                value += 5
+            return value
+
+        ranked = sorted(books, key=score, reverse=True)
+        picked = [b for b in ranked if score(b) >= 60][:limit]
+        return picked or ranked[:3]
+
+    @staticmethod
+    def _parse_json_content(content: str):
+        """模型有时会包 ```json 围栏或前后加解释，尽量抠出 JSON 主体。"""
+        text = (content or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+            text = re.sub(r"\s*```$", "", text).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            text = text[start:end + 1]
+        return json.loads(text)
+
+    @staticmethod
     def _format_search_results(books) -> str:
         """将 BookSearch.search_books 的结果格式化为文本参考信息。"""
         parts = []
@@ -161,7 +208,13 @@ class BookAIClient:
             search_isbn = isbn if (isbn and self._is_valid_isbn(isbn)) else None
             search_results = BookSearch.search_books(title=title, isbn=search_isbn)
             if search_results:
-                ref_text = self._format_search_results(search_results)
+                picked = self._pick_references(search_results, title)
+                ref_text = self._format_search_results(picked)
+                logging.info(
+                    "[BookAI] Use %d/%d reference(s) for '%s': %s",
+                    len(picked), len(search_results), title,
+                    [getattr(b, "title", "") for b in picked],
+                )
                 lines.append("\n以下是从互联网搜索到的参考信息：")
                 lines.append(ref_text)
                 logging.info("[BookAI] Got %d search result(s) for '%s'", len(search_results), title)
@@ -178,7 +231,7 @@ class BookAIClient:
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.2,
-                max_tokens=1500,
+                max_tokens=2500,
             )
 
             content = response.choices[0].message.content
@@ -186,7 +239,7 @@ class BookAIClient:
                 logging.warning("[BookAI] Empty response for book: %s", title)
                 return None
 
-            data = json.loads(content)
+            data = self._parse_json_content(content)
             info = AIBookInfo(
                 category=str(data.get("category", "")).strip(),
                 tags=[str(t).strip() for t in data.get("tags", []) if str(t).strip()],

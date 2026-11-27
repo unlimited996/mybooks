@@ -130,9 +130,15 @@ class AIFillInfoService(AsyncService):
             isbn=mi.isbn or ""
         )
 
-        if info is None or not info.is_valid():
-            msg = _("AI 未能返回有效信息")
-            logging.warning("[AIFill] %s", msg)
+        if info is None:
+            msg = _("AI 调用失败（接口异常或返回格式无法解析），请查看日志")
+            logging.warning("[AIFill] %s book_id=%s", msg, book_id)
+            return {"status": "fail", "msg": msg}
+        if not info.is_valid():
+            # 模型按提示词「信息不足就留空」返回了空分类/空标签，
+            # 与接口失败区分开，避免都显示同一句无法排查的提示。
+            msg = _("AI 判定该书信息不足，未生成分类/标签")
+            logging.warning("[AIFill] %s book_id=%s title=%s", msg, book_id, mi.title)
             return {"status": "fail", "msg": msg}
 
         ok = self._apply_ai_info(book_id, mi, info)
