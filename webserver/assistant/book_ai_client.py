@@ -59,15 +59,6 @@ class BookAIClient:
         if not api_key or not api_url:
             raise ValueError("API_KEY or API_URL is not configured")
 
-        # OpenAI SDK 会自己在 base_url 后拼 /chat/completions。
-        # 用户经常把完整端点粘进来，导致 /v1/chat/completions/chat/completions 404，
-        # 这里统一归一化到「服务根路径」，例如 https://host/v1。
-        api_url = str(api_url).strip().rstrip("/")
-        for suffix in ("/chat/completions", "/completions"):
-            if api_url.endswith(suffix):
-                api_url = api_url[: -len(suffix)].rstrip("/")
-                break
-
         from openai import OpenAI
         self.client = OpenAI(
             api_key=api_key,
