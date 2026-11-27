@@ -117,6 +117,7 @@ class XhsdBookApi:
 
             author = None
             publisher = None
+            pubdate_text = ""
 
             attr_groups = data.get('otherAttributes') or data.get('otherAttrs') or []
             for group in attr_groups:
@@ -128,6 +129,8 @@ class XhsdBookApi:
                             author = val
                         elif key == '出版社':
                             publisher = val
+                        elif key in ('出版时间', '出版日期', '出版年月'):
+                            pubdate_text = val or ""
 
             if not author or not publisher:
                 extra = data.get('extra', {})
@@ -157,6 +160,7 @@ class XhsdBookApi:
                 'title': title,
                 'publisher': publisher,
                 'author': author,
+                'pubdate': pubdate_text,
                 'introduction': introduction,
                 'isbn': isbn,
                 'url': detail_url
@@ -169,6 +173,7 @@ class XhsdBookApi:
     def _metadata(self, info):
         from calibre.ebooks.metadata.book.base import Metadata
         from calibre.utils.date import utcnow
+        from webserver.plugins.meta.douban import str2date
 
         title = info.get("title", "")
         if not title:
@@ -181,8 +186,10 @@ class XhsdBookApi:
         mi.author_sort = mi.authors[0]
         mi.isbn = info.get("isbn", XHSD_ISBN)
         mi.tags = []
-        mi.pubdate = utcnow()
-        mi.timestamp = mi.pubdate
+        # 详情页 BASIC 属性里通常有「出版时间」，取不到就留空：
+        # 以前无条件 utcnow()，会让每本新华书店来源的书都变成“今天出版”。
+        mi.pubdate = str2date(info.get("pubdate")) if info.get("pubdate") else None
+        mi.timestamp = utcnow()
         mi.comments = info.get("introduction", "")
         mi.website = info.get("url", "")
         mi.source = u"新华书店"

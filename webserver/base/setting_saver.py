@@ -243,6 +243,15 @@ class SettingsSaver:
             except Exception:
                 logging.error(traceback.format_exc())
 
+        # 信息源开关/缓存参数变化：清空检索缓存，避免继续命中已禁用源的旧结果
+        if "META_SELECTED_SOURCES" in args or "META_SEARCH_CACHE_TTL" in args:
+            try:
+                from webserver.services.book_search import BookSearch
+
+                BookSearch.clear_cache()
+            except Exception:
+                logging.error(traceback.format_exc())
+
     def restart_async(self):
         def _delayed_restart():
             try:

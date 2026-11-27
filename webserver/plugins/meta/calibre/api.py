@@ -21,6 +21,7 @@ class CalibreMetadataApi:
 
     ALLOWED_PLUGINS = frozenset({'Google', 'Amazon.com'})
     _patched = False
+    _available_plugins = None
 
     @classmethod
     def _ensure_patched(cls):
@@ -31,6 +32,25 @@ class CalibreMetadataApi:
                 cls._patched = True
             except Exception as e:
                 logging.warning("calibre patch_plugins 失败: %s", e)
+
+    @classmethod
+    def _plugin_available(cls, name):
+        """当前 calibre 里是否真的装了该 identify 插件。
+
+        精简镜像/部分发行版只带「New Douban Books」等少数插件，Google/Amazon
+        并不存在；不先判断就会白跑一次 identify（还要建线程池、加载插件），
+        每次搜索多花 0.2~0.5s，日志里也只有一句没头没尾的空结果。
+        """
+        if cls._available_plugins is None:
+            try:
+                from calibre.customize.ui import metadata_plugins
+
+                cls._available_plugins = {p.name for p in metadata_plugins({'identify'})}
+                logging.info("[CalibreMeta]available identify plugins: %s", sorted(cls._available_plugins))
+            except Exception as err:
+                logging.warning("[CalibreMeta]enumerate identify plugins failed: %s", err)
+                cls._available_plugins = set()
+        return name in cls._available_plugins
 
     @staticmethod
     def _make_log_abort():
@@ -83,6 +103,9 @@ class CalibreMetadataApi:
 
         if not isbn:
             return None
+        if not cls._plugin_available("Google"):
+            logging.info("[CalibreMeta]Google 插件未安装，跳过 ISBN 查询 isbn=%s", isbn)
+            return None
         try:
             results = cls._identify(identifiers={'isbn': isbn}, timeout=timeout, source="Google")
             if not results:
@@ -107,6 +130,9 @@ class CalibreMetadataApi:
             return None
 
         if not title:
+            return None
+        if not cls._plugin_available("Amazon.com"):
+            logging.info("[CalibreMeta]Amazon 插件未安装，跳过书名查询 title=%s", title)
             return None
         try:
             kwargs = {'title': title}
